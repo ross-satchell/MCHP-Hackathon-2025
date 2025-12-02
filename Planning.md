@@ -29,8 +29,8 @@ ACA side
 
 ### Chassis & Mounts
 
-- [ ] Design 3D-printed mount for PCB, motors, wheels (CAD model)
-- [ ] 3D print prototype and verify fit for all hardware
+- [X] Design 3D-printed mount for PCB, motors, wheels (CAD model)
+- [X] 3D print prototype and verify fit for all hardware
 - [ ] Refine mount design (if required for wiring/stability)
 - [ ] Assemble: securely mount PCB, motors, wheels
 
@@ -47,13 +47,15 @@ ACA side
 
 ### Dev Environment & Libraries
 
-- [ ] Set up development IDE (Thonny, VS Code, Mu, etc.)
-- [ ] Install/verify MicroPython/CircuitPython firmware on MCU
-- [ ] Include/validate necessary Python libraries for IMU and motor driver
+- [X] Set up development IDE (VS Code, Mu)
+- [X] Install/verify MicroPython/CircuitPython firmware on MCU
+- [X] Include/validate necessary Python libraries for IMU
+- [ ] Libraries for motor driver
+- [ ] Libraries for BLE - built in _bleio or BLE 10.1.0 ( [Download release here](https://github.com/adafruit/Adafruit_CircuitPython_BLE/releases) )
 
 ### Sensor & Motor Verification
 
-- [ ] Write/test MicroPython code to read IMU angle data
+- [X] Write/test MicroPython code to read IMU angle data - Same as Serial Monitor demo code...
 - [ ] Calibrate IMU readings (if/as needed)
 - [ ] Test basic motor control (direction, speed) with driver
 
