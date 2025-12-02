@@ -32,5 +32,5 @@
   - Each step expands utility and removes barriers to entry.
 
 - **Closing / Call to Opportunity**
-  - Not just a hackathon project—a vision for democratizing hands-on engineering!
+  - Not just a hackathon project—a vision for getting hands-on engineering into Ambassador & Educator hands!
   - Championing collaboration, accessibility, and inspiring the next generation of inventors.
