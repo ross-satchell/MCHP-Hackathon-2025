@@ -22,7 +22,7 @@ Our team set out to leverage the same low-cost “Ruler” kit—the backbone of
 Because it’s affordable, available, it ships easily, you get to KEEP your own, and it was designed from the ground up to let beginners do more, faster — with complete documentation and ready-to-go modules.
 
 The ruler is programmed in Python, using CircuitPy, so anyone with minimal programming experience can jump in and start experimenting.
-But we didn’t stop at basics. We added 3D printed parts—you can get these anywhere, in bulk, or print yourself if you have the tools. 
+But we didn’t stop at basics. We added 3D printed parts—you can get these anywhere, in bulk, or print yourself if you have the tools.
 If you know some basic CAD, you can even make adjustments or add elements, to customize futher the the whole kit.  
 
 **Educational Value:**  
@@ -60,7 +60,7 @@ Let’s encourage every student, teacher, and ambassador to push boundaries, inv
 
 Building a piece of HW / Kit in a day is a SIZEABLE task...
 We did order a bunch of pieces beforehand (wheels, motors, MC board, batteries, etc.)
-We intended to but did NOT get a couple of inline fuses. 
+We intended to but did NOT get a couple of inline fuses.
 We also accidently fried the MC board we'd originally planned to use for this. So it wont be driving around today.
 
 But CAD for the 3d printed parts was done day-of. And additional CAD files for mounts, boards, etc will replace the existing metal frame. (for battery holder, MC board mount, etc.)
