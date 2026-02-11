@@ -171,6 +171,7 @@ class PIDController:
         self.last_error = 0.0
         self.last_time = time.monotonic()
 
+
 # ============================================================================
 # IMU ANGLE CALCULATION
 # ============================================================================
@@ -215,102 +216,60 @@ class AngleEstimator:
         return self.angle
 
 # ============================================================================
-# MAIN PROGRAM
+# MAIN PROGRAM FOR MOTOR TEST
 # ============================================================================
 
 def main():
-    print("=== Two-Wheeled Balancing Bot ===")
-    print(f"PID: Kp={KP}, Ki={KI}, Kd={KD}")
-    print(f"Filter: {'Complementary' if USE_COMPLEMENTARY_FILTER else 'Accel-only'}")
-    print()
+    print("=== Motor Test Mode ===")
     
-    # Initialize I2C and IMU
-    i2c = board.I2C()
-    
-    try:
-        icm = adafruit_icm20x.ICM20948(i2c, 0x69)
-        print("ICM20948 found at address 0x69")
-    except:
-        print("Trying alternate address 0x68...")
-        try:
-            icm = adafruit_icm20x.ICM20948(i2c, 0x68)
-            print("ICM20948 found at address 0x68")
-        except:
-            print("ERROR: No ICM20948 found!")
-            return
-    
-    # Initialize motor driver
-    # IMPORTANT: Update these pins to match your wiring!
+    # Initialize motor driver (Pins from your original config)
     motors = DrokMotorDriver(
-        in1_pin=board.D1,   # Motor 1 direction pin 1
-        in2_pin=board.D2,  # Motor 1 direction pin 2
-        ena1_pin=board.D6, # Motor 1 PWM pin
-        in3_pin=board.D3,  # Motor 2 direction pin 1
-        in4_pin=board.D4,  # Motor 2 direction pin 2
-        ena2_pin=board.D7   # Motor 2 PWM pin
-    )
-    print("Motor driver initialized")
-    
-    # Initialize PID controller
-    pid = PIDController(KP, KI, KD, setpoint=TARGET_ANGLE)
-    
-    # Initialize angle estimator
-    angle_estimator = AngleEstimator(
-        use_filter=USE_COMPLEMENTARY_FILTER,
-        alpha=COMPLEMENTARY_ALPHA
+        in1_pin=board.D2,   # Motor 1 direction 1
+        in2_pin=board.D3,   # Motor 1 direction 2
+        ena1_pin=board.D4,  # Motor 1 PWM
+        in3_pin=board.D5,   # Motor 2 direction 1
+        in4_pin=board.D6,   # Motor 2 direction 2
+        ena2_pin=board.D7    # Motor 2 PWM
     )
     
-    print("Starting balance control in 2 seconds...")
-    print("Tip the bot to near-vertical to begin!")
-    time.sleep(2.0)
+    # Test Parameters
+    target_pwm = int(65535 * 0.70)  # 70% of 16-bit PWM
+    step = 500                      # How much to increase PWM per step
+    delay = 0.01                    # Speed of the ramp
     
-    # Main control loop
     try:
-        while True:
-            # Read IMU data
-            accel_x, accel_y, accel_z = icm.acceleration
-            gyro_x, gyro_y, gyro_z = icm.gyro
+        # --- MOTOR 1 TEST ---
+        print(f"Testing Motor 1: Ramping up to {target_pwm}...")
+        for speed in range(0, target_pwm, step):
+            motors.set_motor1(speed)
+            time.sleep(delay)
             
-            # Calculate current angle
-            current_angle = angle_estimator.update(accel_x, accel_z, gyro_y)
+        print("Testing Motor 1: Ramping down to 0...")
+        for speed in range(target_pwm, -1, -step):
+            motors.set_motor1(speed)
+            time.sleep(delay)
+        
+        motors.brake()
+        time.sleep(1.0) # Pause between motors
+        
+        # --- MOTOR 2 TEST ---
+        print(f"Testing Motor 2: Ramping up to {target_pwm}...")
+        for speed in range(0, target_pwm, step):
+            motors.set_motor2(speed)
+            time.sleep(delay)
             
-            # Check if bot has fallen over
-            if abs(current_angle) > MAX_ANGLE:
-                motors.brake()
-                if DEBUG:
-                    print(f"Angle too large: {current_angle:.1f}° - STOPPED")
-                time.sleep(0.01)
-                continue
-            
-            # Check if in deadband (close enough to balanced)
-            if abs(current_angle - TARGET_ANGLE) < MOTOR_DEADBAND:
-                pid_output = 0
-            else:
-                # Calculate PID output
-                pid_output = pid.update(current_angle)
-            
-            # Apply minimum PWM threshold to overcome friction
-            if abs(pid_output) < MIN_PWM and abs(pid_output) > 0:
-                pid_output = MIN_PWM if pid_output > 0 else -MIN_PWM
-            
-            # Constrain output
-            pid_output = max(-MAX_PWM, min(MAX_PWM, pid_output))
-            
-            # Drive motors
-            # Positive PID output = leaning forward = need to drive forward
-            motors.set_both_motors(int(pid_output))
-            
-            if DEBUG:
-                print(f"Angle: {current_angle:6.2f}° | Motor: {int(pid_output):6d}")
-            
-            # Small delay for loop timing
-            time.sleep(0.005)  # 200Hz update rate
-    
+        print("Testing Motor 2: Ramping down to 0...")
+        for speed in range(target_pwm, -1, -step):
+            motors.set_motor2(speed)
+            time.sleep(delay)
+
+        print("Motor test complete!")
+
     except KeyboardInterrupt:
-        print("\nStopping...")
+        print("\nTest interrupted by user.")
     finally:
         motors.brake()
-        print("Motors stopped. Program ended.")
+        print("Motors safely stopped.")
 
 # ============================================================================
 # RUN
