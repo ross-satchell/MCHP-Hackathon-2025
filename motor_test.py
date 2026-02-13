@@ -238,28 +238,40 @@ def main():
     delay = 0.01                    # Speed of the ramp
     
     try:
-        # --- MOTOR 1 TEST ---
-        print(f"Testing Motor 1: Ramping up to {target_pwm}...")
+        # --- MOTOR 1 TEST (Forward & Reverse) ---
+        print("Testing Motor 1: Forward Ramp...")
         for speed in range(0, target_pwm, step):
             motors.set_motor1(speed)
             time.sleep(delay)
-            
-        print("Testing Motor 1: Ramping down to 0...")
         for speed in range(target_pwm, -1, -step):
+            motors.set_motor1(speed)
+            time.sleep(delay)
+
+        print("Testing Motor 1: Reverse Ramp...")
+        for speed in range(0, -target_pwm, -step):
+            motors.set_motor1(speed)
+            time.sleep(delay)
+        for speed in range(-target_pwm, 1, step):
             motors.set_motor1(speed)
             time.sleep(delay)
         
         motors.brake()
-        time.sleep(1.0) # Pause between motors
+        time.sleep(1.0) 
         
-        # --- MOTOR 2 TEST ---
-        print(f"Testing Motor 2: Ramping up to {target_pwm}...")
+        # --- MOTOR 2 TEST (Forward & Reverse) ---
+        print("Testing Motor 2: Forward Ramp...")
         for speed in range(0, target_pwm, step):
             motors.set_motor2(speed)
             time.sleep(delay)
-            
-        print("Testing Motor 2: Ramping down to 0...")
         for speed in range(target_pwm, -1, -step):
+            motors.set_motor2(speed)
+            time.sleep(delay)
+
+        print("Testing Motor 2: Reverse Ramp...")
+        for speed in range(0, -target_pwm, -step):
+            motors.set_motor2(speed)
+            time.sleep(delay)
+        for speed in range(-target_pwm, 1, step):
             motors.set_motor2(speed)
             time.sleep(delay)
 
