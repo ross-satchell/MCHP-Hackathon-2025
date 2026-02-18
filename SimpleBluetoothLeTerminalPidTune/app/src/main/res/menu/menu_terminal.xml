@@ -1,0 +1,28 @@
+<menu xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <item
+        android:id="@+id/clear"
+        android:icon="@drawable/ic_delete_white_24dp"
+        android:title="Clear"
+        app:showAsAction="ifRoom" />
+
+    <item
+        android:id="@+id/connect_disconnect"
+        android:icon="@drawable/ic_baseline_plug_disconnected_24"
+        android:title="Connect"
+        app:showAsAction="ifRoom" />
+
+    <item
+        android:id="@+id/newline"
+        android:title="Newline" />
+
+    <item
+        android:id="@+id/hex"
+        android:title="Hex" />
+
+    <item
+        android:id="@+id/backgroundNotification"
+        android:title="Background notification" />
+
+</menu>
