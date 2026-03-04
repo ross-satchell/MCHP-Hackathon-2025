@@ -1,6 +1,6 @@
 """
-Two-Wheeled Balancing Bot with PID Control and BLE Telemetry
-Uses ICM20948 IMU, Drok dual motor driver, and asyncio for cooperative multitasking
+Two-Wheeled Balancing Bot with Separate PID and BLE Tasks
+This version demonstrates task coordination with shared state
 """
 import asyncio
 import time
@@ -10,44 +10,94 @@ import pwmio
 import digitalio
 import adafruit_icm20x
 import math
+import analogio
+import displayio
+from adafruit_bitmap_font import bitmap_font
+from adafruit_display_text import label
+from adafruit_st7789 import ST7789
+from fourwire import FourWire
+import microcontroller
+import neopixel
+from audiocore import WaveFile
+from audioio import AudioOut
 
 # ============================================================================
 # CONFIGURATION
 # ============================================================================
 
-# Debug options
 DEBUG = True
-USE_COMPLEMENTARY_FILTER = True  # Set to False to use only accelerometer
+USE_COMPLEMENTARY_FILTER = True
 
-# PID Tuning Parameters (Start conservative and tune)
-KP = 18000    # Proportional gain - how aggressively to respond to current erro
-KI = 30.0      # Integral gain - eliminates steady-state error
-KD = 220.0     # Derivative gain - dampens oscillations
-d_filter_alpha = 0.7
+# PID Tuning Parameters
+KP = 15000
+KI = 0.0
+KD = 10.0
 
 # Motor constraints
-MAX_PWM = 65535      # Maximum PWM value (16-bit)
-MIN_PWM = 12000       # Minimum PWM to overcome motor friction
-MOTOR_DEADBAND = 0.15 # Angle deadband (degrees) where motors stay off
+MAX_PWM = 65535
+MIN_PWM = 12000
+MOTOR_DEADBAND = 0.25
 
-# Target angle (degrees from vertical)
-TARGET_ANGLE = -2.3
+# Target angle
+TARGET_ANGLE = -2.3 
 
-# Angle limits for safety
-MAX_ANGLE = 20.0     # If tilt exceeds this, stop trying (fallen over)
+# Angle limits
+MAX_ANGLE = 15.0
 
 # Filter parameters
-COMPLEMENTARY_ALPHA = 0.99  # Weight for gyro vs accel (0.98 = 98% gyro, 2% accel)
-
-# Task Frequencies
-PID_FREQ_HZ  = 200   # PID control loop frequency (Hz)
-BLE_FREQ_HZ  = 200   # BLE transmit frequency (Hz) — can differ from PID_FREQ_HZ
-
-PID_PERIOD   = 1.0 / PID_FREQ_HZ   # seconds per PID loop iteration
-BLE_PERIOD   = 1.0 / BLE_FREQ_HZ   # seconds per BLE transmit iteration
+COMPLEMENTARY_ALPHA = 0.98
 
 # BLE Configuration
-BLE_BAUDRATE = 115200  # Match your BLE module
+BLE_BAUDRATE = 115200
+
+# Battery Configuration
+BATTERY_FULL_VOLTAGE = 8.4
+BATTERY_EMPTY_VOLTAGE = 7.2
+BATTERY_ADC_DIVIDER = 3.145 #Value measured with a multimeter # Voltage divider factor (R1+R2)/R2. R1=22k, R2=10k
+BATTERY_UPDATE_INTERVAL = 100  # Seconds between battery/LCD updates
+BATTERY_LOW_THRESHOLD = 10     # Percentage to trigger one-time alarm
+BATTERY_CRITICAL_THRESHOLD = 5  # Percentage to trigger repeating alarm
+BATTERY_ALARM_DURATION = 5     # Seconds to play alarm
+BATTERY_ALARM_FILE = "/mixkit-alert-alarm-1005.wav"
+ADC_REF = 3.3
+
+# NeoPixel Configuration
+NEOPIXEL_BRIGHTNESS = 0.1
+
+# LCD Configuration
+LCD_WIDTH = 135
+LCD_HEIGHT = 240
+
+# ============================================================================
+# SHARED STATE CLASS
+# ============================================================================
+
+class SharedState:
+    """Shared state between tasks"""
+    def __init__(self):
+        self.current_angle = 0.0
+        self.pid_output = 0
+        self.is_fallen = False
+        self.update_count = 0
+        self.lock = None  # Will be set in async context
+    
+    async def update_telemetry(self, angle, output, fallen=False):
+        """Thread-safe update of telemetry data"""
+        if self.lock:
+            async with self.lock:
+                self.current_angle = angle
+                self.pid_output = output
+                self.is_fallen = fallen
+                self.update_count += 1
+    
+    async def get_telemetry(self):
+        """Thread-safe read of telemetry data"""
+        if self.lock:
+            async with self.lock:
+                return (self.current_angle, self.pid_output, 
+                       self.is_fallen, self.update_count)
+        return (self.current_angle, self.pid_output, 
+               self.is_fallen, self.update_count)
 
 # ============================================================================
 # MOTOR CONTROL CLASS
@@ -57,30 +107,23 @@ class DrokMotorDriver:
     """Controls two DC motors via Drok driver board"""
     
     def __init__(self, in1_pin, in2_pin, ena1_pin, in3_pin, in4_pin, ena2_pin):
-        """Initialize motor driver pins"""
-        # Motor 1 pins
         self.in1 = digitalio.DigitalInOut(in1_pin)
         self.in1.direction = digitalio.Direction.OUTPUT
         self.in2 = digitalio.DigitalInOut(in2_pin)
         self.in2.direction = digitalio.Direction.OUTPUT
         self.ena1 = pwmio.PWMOut(ena1_pin, frequency=20000, duty_cycle=0)
         
-        # Motor 2 pins
         self.in3 = digitalio.DigitalInOut(in3_pin)
         self.in3.direction = digitalio.Direction.OUTPUT
         self.in4 = digitalio.DigitalInOut(in4_pin)
         self.in4.direction = digitalio.Direction.OUTPUT
         self.ena2 = pwmio.PWMOut(ena2_pin, frequency=20000, duty_cycle=0)
-
-        # Balance factor: 1.0 means 100% speed. 
-        # Reduce the stronger motor (e.g., 0.9) to match the weaker one.
+        
         self.motor1_trim = 1.0  
         self.motor2_trim = 1.0
-        
         self.brake()
     
     def brake(self):
-        """Brake both motors"""
         self.in1.value = False
         self.in2.value = False
         self.in3.value = False
@@ -89,118 +132,82 @@ class DrokMotorDriver:
         self.ena2.duty_cycle = 0
     
     def set_motor1(self, speed):
-        """
-        Set motor 1 speed and direction
-        speed: -65535 (full reverse) to +65535 (full forward)
-        """
-        if speed > 0:  # Forward
+        if speed > 0:
             self.in1.value = True
             self.in2.value = False
             self.ena1.duty_cycle = min(int(abs(speed)), MAX_PWM)
-        elif speed < 0:  # Reverse
+        elif speed < 0:
             self.in1.value = False
             self.in2.value = True
             self.ena1.duty_cycle = min(int(abs(speed)), MAX_PWM)
-        else:  # Brake
+        else:
             self.in1.value = False
             self.in2.value = False
             self.ena1.duty_cycle = 0
     
     def set_motor2(self, speed):
-        """
-        Set motor 2 speed and direction
-        speed: -65535 (full reverse) to +65535 (full forward)
-        """
-        if speed > 0:  # Forward
+        if speed > 0:
             self.in3.value = True
             self.in4.value = False
             self.ena2.duty_cycle = min(int(abs(speed)), MAX_PWM)
-        elif speed < 0:  # Reverse
+        elif speed < 0:
             self.in3.value = False
             self.in4.value = True
             self.ena2.duty_cycle = min(int(abs(speed)), MAX_PWM)
-        else:  # Brake
+        else:
             self.in3.value = False
             self.in4.value = False
             self.ena2.duty_cycle = 0
     
     def set_both_motors(self, speed):
-        """Set both motors to same speed (for balancing)"""
         self.set_motor1(speed)
         self.set_motor2(speed)
 
-"""
-IMPROVED PID Controller with Derivative Filtering
-Replace the PIDController class in your code with this version
-"""
+# ============================================================================
+# PID CONTROLLER CLASS
+# ============================================================================
 
 class PIDController:
-    """PID controller with Slow Start gain ramping AND derivative filtering"""
+    """PID controller with Slow Start gain ramping"""
     
-    def __init__(self, kp, ki, kd, setpoint=0.0, ramp_time=2.0, d_filter_alpha=0.5):
+    def __init__(self, kp, ki, kd, setpoint=0.0, ramp_time=2.0):
         self.target_kp = kp
         self.ki = ki
         self.target_kd = kd
         self.setpoint = setpoint
-        
         self.ramp_time = ramp_time
-        self.start_time = None  # Will be set when ramping begins
-        
+        self.start_time = None
         self.integral = 0.0
         self.last_error = 0.0
         self.last_time = time.monotonic()
-        
-        # NEW: Derivative filtering to reduce noise amplification
-        self.d_filter_alpha = d_filter_alpha  # 0.0 = no filtering, 1.0 = max filtering
-        self.filtered_derivative = 0.0
 
     def update(self, current_value):
-        """Calculate PID output with ramped gains and filtered derivative"""
         current_time = time.monotonic()
-        
-        # Initialize start_time on the first update call
         if self.start_time is None:
             self.start_time = current_time
             
         dt = current_time - self.last_time
         if dt <= 0.0: dt = 0.001
         
-        # Calculate Ramp Factor (0.0 to 1.0)
         elapsed = current_time - self.start_time
         ramp_factor = min(1.0, elapsed / self.ramp_time)
         
-        # Current Ramped Gains
         cur_kp = self.target_kp * ramp_factor
         cur_kd = self.target_kd * ramp_factor
         
-        # Calculate error
         error = self.setpoint - current_value
-        
-        # Proportional term
         p_term = cur_kp * error
         
-        # Integral term (with anti-windup)
         self.integral += error * dt
         max_i = 65535 / (2.0 * self.ki) if self.ki != 0 else 1000.0
         self.integral = max(-max_i, min(max_i, self.integral))
         i_term = self.ki * self.integral
         
-        # Derivative term WITH FILTERING
-        # Calculate raw derivative
-        raw_derivative = (error - self.last_error) / dt
+        derivative = (error - self.last_error) / dt
+        d_term = cur_kd * derivative
         
-        # Apply exponential moving average filter to smooth out noise
-        # Higher alpha = more filtering (slower response, less noise)
-        # Lower alpha = less filtering (faster response, more noise)
-        self.filtered_derivative = (self.d_filter_alpha * self.filtered_derivative + 
-                                   (1 - self.d_filter_alpha) * raw_derivative)
-        
-        d_term = cur_kd * self.filtered_derivative
-        
-        # Calculate output
         output = p_term + i_term + d_term
         
-        # Update state
         self.last_error = error
         self.last_time = current_time
         
@@ -210,25 +217,10 @@ class PIDController:
         return output
 
     def reset(self):
-        """Reset PID state and restart the ramp"""
         self.integral = 0.0
         self.last_error = 0.0
         self.last_time = time.monotonic()
-        self.start_time = time.monotonic()  # Re-trigger slow start
-        self.filtered_derivative = 0.0  # Reset derivative filter
-
-
-# Example of how to initialize with derivative filtering:
-# In your main() function, replace:
-#   pid = PIDController(KP, KI, KD, setpoint=TARGET_ANGLE, ramp_time=3.0)
-# With:
-#   pid = PIDController(KP, KI, KD, setpoint=TARGET_ANGLE, ramp_time=3.0, d_filter_alpha=0.7)
-#
-# d_filter_alpha recommendations:
-#   0.5 = moderate filtering (good starting point)
-#   0.7 = heavy filtering (for very noisy systems)
-#   0.3 = light filtering (for smooth, low-noise systems)
-
+        self.start_time = time.monotonic()
 
 # ============================================================================
 # IMU ANGLE CALCULATION
@@ -248,26 +240,17 @@ class AngleEstimator:
         return angle
     
     def update(self, accel_x, accel_z, gyro_y):
-        """
-        Update angle estimate
-        gyro_y is the rotation rate around Y-axis (tilting forward/back)
-        """
         current_time = time.monotonic()
         dt = current_time - self.last_time
-        
         if dt <= 0.0:
             dt = 0.001
         
-        # Get angle from accelerometer
         accel_angle = self.calculate_accel_angle(accel_x, accel_z)
         
         if self.use_filter:
-            # Complementary filter: combine gyro and accel
-            # Integrate gyro for short-term accuracy
-            gyro_rate = gyro_y * 180.0 / math.pi  # Convert rad/s to deg/s
+            gyro_rate = gyro_y * 180.0 / math.pi
             self.angle = self.alpha * (self.angle + gyro_rate * dt) + (1 - self.alpha) * accel_angle
         else:
-            # Use only accelerometer
             self.angle = accel_angle
         
         self.last_time = current_time
@@ -277,192 +260,327 @@ class AngleEstimator:
 # ASYNC TASKS
 # ============================================================================
 
-async def balance_control_task(motors, pid, angle_estimator, icm, uart):
+async def pid_control_task(motors, pid, angle_estimator, icm, shared_state):
     """
-    Main balance control loop running at PID_FREQ_HZ.
-    Sends telemetry via BLE after each PID calculation at BLE_FREQ_HZ.
-    Both periods are derived from their respective frequency constants.
+    PID control loop running at 200Hz
+    Updates shared state with angle and PWM output
     """
-    print(f"Balance control task started  (PID:{PID_FREQ_HZ}Hz  BLE:{BLE_FREQ_HZ}Hz)")
-    
-    loop_count = 0
+    print("PID control task started")
     
     while True:
         loop_start = time.monotonic()
         
-        # Read IMU data
+        # Read IMU
         accel_x, accel_y, accel_z = icm.acceleration
         gyro_x, gyro_y, gyro_z = icm.gyro
         
-        # Calculate current angle
+        # Calculate angle
         current_angle = angle_estimator.update(accel_x, accel_z, gyro_y)
         
-        # Check if bot has fallen over
+        # Check if fallen
         if abs(current_angle) > MAX_ANGLE:
             motors.brake()
             pid.reset()
+            await shared_state.update_telemetry(current_angle, 0, fallen=True)
             if DEBUG:
-                print("Fallen! Resetting PID and Gain Ramp.")
-            
-            # Send fallen status via BLE
-            try:
-                ble_msg = f"{current_angle:.2f},0,FALLEN\n"
-                uart.write(bytes(ble_msg, "ascii"))
-            except:
-                pass
-            
-            await asyncio.sleep(10 * PID_PERIOD)  # ~10 loop periods recovery pause
+                print("Fallen! Resetting PID.")
+            await asyncio.sleep(0.1)
             continue
         
-        # Check if in deadband (close enough to balanced)
+        # Calculate PID
         if abs(current_angle - TARGET_ANGLE) < MOTOR_DEADBAND:
             pid_output = 0
         else:
-            # Calculate PID output
             pid_output = pid.update(current_angle)
         
-        # Apply minimum PWM threshold to overcome friction
+        # Apply constraints
         if abs(pid_output) < MIN_PWM and abs(pid_output) > 0:
             pid_output = MIN_PWM if pid_output > 0 else -MIN_PWM
-        
-        # Constrain output
         pid_output = max(-MAX_PWM, min(MAX_PWM, pid_output))
         
         # Drive motors
         motors.set_both_motors(int(pid_output))
         
-        # Send telemetry via BLE after PID calculation
-        try:
-            ble_msg = f"{current_angle:.2f},{int(pid_output)}\n"
-            uart.write(bytes(ble_msg, "ascii"))
-        except Exception as e:
-            # Continue even if BLE write fails
-            if DEBUG and loop_count % 200 == 0:  # Print error occasionally
-                print(f"BLE write error: {e}")
+        # Update shared state
+        await shared_state.update_telemetry(current_angle, int(pid_output), fallen=False)
         
-        # Debug output to console
         if DEBUG:
             print(f"{current_angle:6.2f},{int(pid_output):6d}")
         
-        # Maintain PID_FREQ_HZ update rate — sleep for remainder of period
+        # Maintain 200Hz
         elapsed = time.monotonic() - loop_start
-        sleep_time = PID_PERIOD - elapsed
+        sleep_time = 0.005 - elapsed
+        await asyncio.sleep(max(0, sleep_time))
 
-        if sleep_time > 0:
-            await asyncio.sleep(sleep_time)
-        else:
-            # Work exceeded the period — yield briefly so other tasks can run
-            await asyncio.sleep(0)
-        
-        loop_count += 1
+async def ble_transmit_task(uart, shared_state):
+    """
+    BLE transmission task running at 200Hz
+    Sends angle and PWM data from shared state
+    """
+    print("BLE transmit task started")
+    
+    last_update_count = 0
+    last_send_time = 0
+    send_interval = 0.05  # seconds (20Hz) - avoid overwhelming UART link
+
+    while True:
+        loop_start = time.monotonic()
+
+        # Get telemetry from shared state
+        angle, output, fallen, update_count = await shared_state.get_telemetry()
+
+        # Throttle sends to avoid saturating the UART (and blocking)
+        now = time.monotonic()
+        if update_count != last_update_count and (now - last_send_time) >= send_interval:
+            try:
+                if fallen:
+                    ble_msg = f"{angle:.2f},0,FALLEN\n"
+                else:
+                    ble_msg = f"{angle:.2f},{output}\n"
+                # Guard write with try/except; if it raises, skip and try later
+                uart.write(bytes(ble_msg, "ascii"))
+                last_update_count = update_count
+                last_send_time = now
+            except Exception as e:
+                if DEBUG:
+                    print(f"BLE transmit error: {e}")
+
+        # Run loop at ~20-200Hz, but avoid tight spinning
+        elapsed = time.monotonic() - loop_start
+        sleep_time = 0.01 - elapsed
+        await asyncio.sleep(max(0, sleep_time))
 
 async def ble_receive_task(uart):
     """
-    Optional task to receive commands via BLE
-    Runs independently and can be used for parameter tuning
+    BLE receive task for remote commands
+    Runs at lower frequency (~20Hz)
     """
     print("BLE receive task started")
-    
+
+    has_in_waiting = hasattr(uart, "in_waiting")
+
     while True:
-        # Check for incoming BLE data
         try:
-            data = uart.read(32)
-            if data is not None:
-                data_string = ''.join([chr(b) for b in data])
-                print(f"BLE RX: {data_string}")
-                # Here you could parse commands like "KP=7000" to adjust parameters
-        except:
+            if has_in_waiting:
+                if uart.in_waiting > 0:
+                    data = uart.read(uart.in_waiting)
+                else:
+                    data = None
+            else:
+                # Fallback: attempt a short non-blocking read if supported
+                # (may still block on some builds; prefer in_waiting)
+                data = uart.read(64)
+        except Exception as e:
+            if DEBUG:
+                print(f"BLE receive error: {e}")
+            data = None
+
+        if data:
+            try:
+                print(data.decode("utf-8"), end="")
+            except Exception:
+                print(data)
+
+        await asyncio.sleep(0.01)
+
+async def play_alarm(audio, duration):
+    """Play the alarm WAV file via DAC for the specified duration in seconds."""
+    try:
+        wave_file = open(BATTERY_ALARM_FILE, "rb")
+        wave = WaveFile(wave_file)
+        audio.play(wave, loop=True)
+        await asyncio.sleep(duration)
+        audio.stop()
+        wave_file.close()
+    except Exception as e:
+        if DEBUG:
+            print(f"Alarm playback error: {e}")
+
+async def battery_display_task(battery_adc, uart, text_battery_pct, text_battery_volt, pixels, audio):
+    """
+    Reads battery voltage, updates LCD display and NeoPixel 0,
+    and sends battery stats via BLE every BATTERY_UPDATE_INTERVAL seconds.
+    Plays alarm when battery is low.
+    """
+    print("Battery display task started")
+
+    low_alarm_played = False
+    last_critical_alarm = 0
+
+    while True:
+        # Read battery voltage from ADC
+        adc_value = battery_adc.value
+        print("ADC Val: ", adc_value)
+        voltage = (adc_value / 65535) * ADC_REF * BATTERY_ADC_DIVIDER
+        print("Battery Voltage: ", voltage)
+
+        # Calculate battery percentage (linear mapping between empty and full)
+        pct = (voltage - BATTERY_EMPTY_VOLTAGE) / (BATTERY_FULL_VOLTAGE - BATTERY_EMPTY_VOLTAGE) * 100.0
+        pct = max(0.0, min(100.0, pct))
+
+        # Determine color based on battery percentage
+        if pct > 50:
+            text_color = 0x00FF00  # Green
+            pixel_color = (0, 255, 0)
+        elif pct >= 25:
+            text_color = 0xFF8000  # Orange
+            pixel_color = (255, 128, 0)
+        else:
+            text_color = 0xFF0000  # Red
+            pixel_color = (255, 0, 0)
+
+        # Update LCD text and color
+        text_battery_pct.text = f"{pct:.0f}%"
+        text_battery_pct.color = text_color
+        text_battery_volt.text = f"{voltage:.2f}V"
+        text_battery_volt.color = text_color
+
+        # Update NeoPixel 0
+        pixels[0] = pixel_color
+        pixels.show()
+
+        # Send battery stats via BLE
+        try:
+            ble_msg = f"BAT:{pct:.0f}%,{voltage:.2f}V\n"
+            uart.write(bytes(ble_msg, "ascii"))
+        except Exception:
             pass
-        
-        # Run at BLE_FREQ_HZ
-        await asyncio.sleep(BLE_PERIOD)
+
+        if DEBUG:
+            print(f"Battery: {pct:.0f}% ({voltage:.2f}V)")
+
+        # Low battery alarm: one-time when first dropping below 20%
+        if pct < BATTERY_LOW_THRESHOLD and not low_alarm_played:
+            low_alarm_played = True
+            print("Low battery alarm!")
+            await play_alarm(audio, BATTERY_ALARM_DURATION)
+
+        # Critical battery alarm: every 60 seconds when below 10%
+        if pct < BATTERY_CRITICAL_THRESHOLD:
+            now = time.monotonic()
+            if now - last_critical_alarm >= 60:
+                last_critical_alarm = now
+                print("Critical battery alarm!")
+                await play_alarm(audio, BATTERY_ALARM_DURATION)
+
+        await asyncio.sleep(BATTERY_UPDATE_INTERVAL)
 
 # ============================================================================
 # MAIN PROGRAM
 # ============================================================================
 
 async def main():
-    print("=== Two-Wheeled Balancing Bot with BLE ===")
+    print("=== Balancing Bot with Separate PID and BLE Tasks ===")
     print(f"PID: Kp={KP}, Ki={KI}, Kd={KD}")
-    print(f"Filter: {'Complementary' if USE_COMPLEMENTARY_FILTER else 'Accel-only'}")
-    print(f"PID loop: {PID_FREQ_HZ}Hz  (period {PID_PERIOD*1000:.2f}ms)")
-    print(f"BLE tx:   {BLE_FREQ_HZ}Hz  (period {BLE_PERIOD*1000:.2f}ms)")
-    print(f"Target Angle: {TARGET_ANGLE}°")
+    print(f"BLE: {BLE_BAUDRATE} baud")
     print()
     
     # Initialize I2C and IMU
     i2c = board.I2C()
-    
     try:
         icm = adafruit_icm20x.ICM20948(i2c, 0x69)
-        print("ICM20948 found at address 0x69")
+        print("ICM20948 found at 0x69")
     except:
-        print("Trying alternate address 0x68...")
         try:
             icm = adafruit_icm20x.ICM20948(i2c, 0x68)
-            print("ICM20948 found at address 0x68")
+            print("ICM20948 found at 0x68")
         except:
             print("ERROR: No ICM20948 found!")
             return
     
-    # Initialize BLE UART
+    # Initialize BLE UART (use BLE_TX/BLE_RX when available, fall back to TX/RX)
     try:
-        uart = busio.UART(board.BLE_TX, board.BLE_RX, baudrate=BLE_BAUDRATE)
-        print(f"BLE UART initialized at {BLE_BAUDRATE} baud")
+        tx = getattr(board, "BLE_TX", getattr(board, "TX", None))
+        rx = getattr(board, "BLE_RX", getattr(board, "RX", None))
+        if tx is None or rx is None:
+            raise RuntimeError("No UART TX/RX pins available on this board - update pin names.")
+        # Use a short timeout so `read()` is effectively non-blocking
+        uart = busio.UART(tx, rx, baudrate=BLE_BAUDRATE, timeout=0.01)
+        print(f"BLE UART initialized at {BLE_BAUDRATE} baud (tx={tx}, rx={rx})")
     except Exception as e:
-        print(f"WARNING: BLE UART initialization failed: {e}")
-        print("Continuing without BLE...")
-        uart = None
+        print(f"ERROR: BLE UART failed: {e}")
+        return
     
-    # Initialize motor driver
+    # Initialize battery ADC
+    battery_adc = analogio.AnalogIn(board.A0)
+    print("Battery ADC initialized")
+
+    # Initialize audio output via DAC (WAV files must be Mono 16-bit at 22kHz or less)
+    audio = AudioOut(board.DAC)
+    print("Audio DAC initialized")
+
+    # Initialize NeoPixels
+    pixels = neopixel.NeoPixel(board.NEOPIXEL, 5, brightness=NEOPIXEL_BRIGHTNESS, auto_write=False)
+    pixels.fill(0x000000)
+    pixels.show()
+    print("NeoPixels initialized")
+
+    # Initialize LCD display
+    displayio.release_displays()
+    spi = board.LCD_SPI()
+    tft_cs = board.LCD_CS
+    tft_dc = board.D4
+    backlight = digitalio.DigitalInOut(microcontroller.pin.PA06)
+    backlight.direction = digitalio.Direction.OUTPUT
+    backlight.value = False  # Turn backlight on
+
+    display_bus = FourWire(spi, command=tft_dc, chip_select=tft_cs)
+    display = ST7789(
+        display_bus, rotation=0, width=LCD_WIDTH, height=LCD_HEIGHT, rowstart=40, colstart=53
+    )
+
+    font = bitmap_font.load_font("/Roboto-Regular-47.bdf")
+    text_battery_pct = label.Label(font, text="---%", color=0x00FF00)
+    text_battery_pct.x = 0
+    text_battery_pct.y = 40
+
+    text_battery_volt = label.Label(font, text="-.-V", color=0x00FF00)
+    text_battery_volt.x = 0
+    text_battery_volt.y = 120
+
+    parent_group = displayio.Group()
+    parent_group.append(text_battery_pct)
+    parent_group.append(text_battery_volt)
+    display.root_group = parent_group
+    print("LCD display initialized")
+
+    # Initialize motors
     motors = DrokMotorDriver(
-        in1_pin=board.D2,   # Motor 1 direction pin 1
-        in2_pin=board.D3,   # Motor 1 direction pin 2
-        ena1_pin=board.D4,  # Motor 1 PWM pin
-        in3_pin=board.D5,   # Motor 2 direction pin 1
-        in4_pin=board.D6,   # Motor 2 direction pin 2
-        ena2_pin=board.D7   # Motor 2 PWM pin
+        in1_pin=board.D2, in2_pin=board.D3, ena1_pin=board.D1,
+        in3_pin=board.D5, in4_pin=board.D6, ena2_pin=board.D7
     )
     motors.motor2_trim = 1.6
     print("Motor driver initialized")
     
-    # Initialize PID controller with 3 second ramp
-    pid = PIDController(KP, KI, KD, setpoint=TARGET_ANGLE, ramp_time=3.0, d_filter_alpha=0.7)
-    
-    # Initialize angle estimator
+    # Initialize PID and angle estimator
+    pid = PIDController(KP, KI, KD, setpoint=TARGET_ANGLE, ramp_time=3.0)
     angle_estimator = AngleEstimator(
         use_filter=USE_COMPLEMENTARY_FILTER,
         alpha=COMPLEMENTARY_ALPHA
     )
     
-    print("Starting balance control in 2 seconds...")
-    print("Tip the bot to near-vertical to begin!")
+    # Create shared state with asyncio lock
+    shared_state = SharedState()
+    shared_state.lock = asyncio.Lock()
+    
+    print("Starting in 2 seconds...")
     await asyncio.sleep(2.0)
     
-    # Create tasks
-    tasks = []
+    # Create and run tasks
+    tasks = [
+        asyncio.create_task(pid_control_task(motors, pid, angle_estimator, icm, shared_state)),
+        asyncio.create_task(ble_transmit_task(uart, shared_state)),
+        asyncio.create_task(battery_display_task(battery_adc, uart, text_battery_pct, text_battery_volt, pixels, audio)),
+        asyncio.create_task(ble_receive_task(uart)),  # Optional
+    ]
     
-    # Balance control task (required)
-    if uart:
-        tasks.append(asyncio.create_task(
-            balance_control_task(motors, pid, angle_estimator, icm, uart)
-        ))
-    else:
-        print("ERROR: Cannot run without BLE UART")
-        return
-    
-    # Optional: BLE receive task for remote commands
-    # Uncomment to enable receiving commands via BLE
-    # tasks.append(asyncio.create_task(ble_receive_task(uart)))
-    
-    # Run all tasks
     try:
         await asyncio.gather(*tasks)
     except KeyboardInterrupt:
         print("\nStopping...")
     finally:
         motors.brake()
-        print("Motors stopped. Program ended.")
+        print("Motors stopped.")
 
 # ============================================================================
 # RUN
@@ -472,4 +590,4 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\nProgram terminated by user")
+        print("\nProgram terminated")
