@@ -121,6 +121,10 @@ class DrokMotorDriver:
         
         self.motor1_trim = 1.0  
         self.motor2_trim = 1.0
+        self.motor1_last_dir = 0  # -1: reverse, 0: stopped, 1: forward
+        self.motor2_last_dir = 0
+        self.motor1_brake_until = 0.0
+        self.motor2_brake_until = 0.0
         self.brake()
     
     def brake(self):
@@ -132,33 +136,57 @@ class DrokMotorDriver:
         self.ena2.duty_cycle = 0
     
     def set_motor1(self, speed):
+        current_time = time.monotonic()
+        desired_dir = 1 if speed > 0 else (-1 if speed < 0 else 0)
+        
+        if desired_dir != 0 and self.motor1_last_dir != 0 and desired_dir != self.motor1_last_dir:
+            if current_time < self.motor1_brake_until:
+                self.ena1.duty_cycle = 0
+                return
+            else:
+                self.motor1_brake_until = current_time + 0.020
+        
         if speed > 0:
             self.in1.value = True
             self.in2.value = False
             self.ena1.duty_cycle = min(int(abs(speed)), MAX_PWM)
+            self.motor1_last_dir = 1
         elif speed < 0:
             self.in1.value = False
             self.in2.value = True
             self.ena1.duty_cycle = min(int(abs(speed)), MAX_PWM)
+            self.motor1_last_dir = -1
         else:
             self.in1.value = False
             self.in2.value = False
             self.ena1.duty_cycle = 0
-    
+            self.motor1_last_dir = 0
     def set_motor2(self, speed):
+        current_time = time.monotonic()
+        desired_dir = 1 if speed > 0 else (-1 if speed < 0 else 0)
+        
+        if desired_dir != 0 and self.motor2_last_dir != 0 and desired_dir != self.motor2_last_dir:
+            if current_time < self.motor2_brake_until:
+                self.ena2.duty_cycle = 0
+                return
+            else:
+                self.motor2_brake_until = current_time + 0.020
+        
         if speed > 0:
             self.in3.value = True
             self.in4.value = False
             self.ena2.duty_cycle = min(int(abs(speed)), MAX_PWM)
+            self.motor2_last_dir = 1
         elif speed < 0:
             self.in3.value = False
             self.in4.value = True
             self.ena2.duty_cycle = min(int(abs(speed)), MAX_PWM)
+            self.motor2_last_dir = -1
         else:
             self.in3.value = False
             self.in4.value = False
             self.ena2.duty_cycle = 0
-    
+            self.motor2_last_dir = 0
     def set_both_motors(self, speed):
         self.set_motor1(speed)
         self.set_motor2(speed)
